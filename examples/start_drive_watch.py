@@ -1,4 +1,7 @@
-"""Start a Drive changes watch channel that points to the webhook URL.
+exiftool -overwrite_original -r \
+  -IPTC:DigitalSourceType="compositeWithTrainedAlgorithmicMedia" \
+  -XMP-iptcExt:DigitalSourceType="http://cv.iptc.org/newscodes/digitalsourcetype/compositeWithTrainedAlgorithmicMedia" \
+  "/path/to/project Metatags""""Start a Drive changes watch channel that points to the webhook URL.
 
 Usage:
   python examples/start_drive_watch.py --service-account-file google-service-account.json --webhook-url https://.../drive-webhook
