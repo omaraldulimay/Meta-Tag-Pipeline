@@ -1,121 +1,69 @@
-# AI-Act-Kennzeichnungs-Tool für Produktmedien
+# Meta Tag Pipeline
 
-Prüft KI-generierte Produktbilder und -videos auf AI-Act-konforme Kennzeichnung
-(Art. 50 EU AI Act) und ergänzt fehlende Kennzeichnung automatisch — sowohl in
-Metadaten (IPTC "Digital Source Type" + C2PA Content Credentials) als auch
-sichtbar (Badge/Wasserzeichen).
+A command line tool that checks AI generated product images and videos for the labelling the EU AI Act asks for (Article 50) and adds whatever is missing, both in the metadata and as a visible badge. Built for the team that publishes product media to online shops.
 
-## 1. Installation
+## Why
 
-### 1.1 Externe Kommandozeilen-Tools
+When product photos or clips are made with AI tools, they should be marked as such. Some tools write that information into the file, some do not, and nobody wants to check hundreds of files by hand before an upload. This tool scans a folder, tells you which files are fully marked, partly marked or not marked, fixes what it can, and sorts the files so a person only looks at the problem cases.
 
-Diese müssen auf dem System installiert und im `PATH` verfügbar sein:
+## How it works
 
-| Tool | Zweck | macOS (Homebrew) | Ubuntu/Debian |
-|---|---|---|---|
-| `exiftool` | EXIF/IPTC/XMP lesen & schreiben | `brew install exiftool` | `apt install libimage-exiftool-perl` |
-| `ffmpeg` / `ffprobe` | Video-Metadaten, Frame-Extraktion, Badge-Overlay | `brew install ffmpeg` | `apt install ffmpeg` |
-| `c2patool` | C2PA-Manifest (Content Credentials) lesen/schreiben | siehe [c2patool Releases](https://github.com/contentauth/c2patool/releases) | siehe Releases |
-| `tesseract` | OCR für die Sichtbarkeits-Heuristik | `brew install tesseract` | `apt install tesseract-ocr` |
-| `openssl` | Selbstsigniertes Test-Zertifikat erzeugen | i.d.R. vorinstalliert | i.d.R. vorinstalliert |
-
-Prüfen, ob alles installiert ist:
-
-```bash
-exiftool -ver && ffmpeg -version && c2patool --version && tesseract --version && openssl version
+```mermaid
+flowchart LR
+    A[incoming folder] --> B[Scan metadata]
+    B --> C[Guess the AI model]
+    C --> D[Write IPTC tag and C2PA manifest]
+    D --> E[Check for visible label, add badge]
+    E --> F[Report CSV and JSON]
+    F --> G[compliant or review folder]
 ```
 
-### 1.2 Python-Abhängigkeiten
+1. `metadata_reader.py` reads EXIF, IPTC and XMP with `exiftool`, video info with `ffprobe` and any C2PA manifest with `c2patool`. The result is one of three states: fully marked, partly marked, not marked.
+2. `model_detection.py` looks for known generator names (Midjourney, Firefly, Sora and so on) in the metadata. This is a text match, so it is a guess. New names go into `MODEL_SIGNATURES` in `config.py`.
+3. `metadata_writer.py` sets the IPTC "Digital Source Type" and embeds a signed C2PA manifest.
+4. `visible_label.py` runs OCR (Tesseract) on the four image corners, or on the first video frame, to see whether a text label is already there. If not, it overlays a badge (Pillow for images, `ffmpeg` for videos).
+5. `report.py` writes `report.csv` and `report.json`. `file_router.py` moves files to `compliant/` or `review/`. One broken file never stops the batch.
+
+Supported types: `.jpg`, `.jpeg`, `.png`, `.webp`, `.mp4`, `.mov`.
+
+## Stack
+
+Python 3, Pillow, pytesseract, and the external tools `exiftool`, `ffmpeg`, `c2patool`, `tesseract` and `openssl`. The `examples/` folder has ways to run it on a schedule or on a Drive folder (cron, a Drive webhook, a Google Apps Script). `google_apps_script/` contains a Drive only variant that writes the XMP field into JPEGs on the byte level.
+
+## Run it
 
 ```bash
+# external tools, e.g. on macOS
+brew install exiftool ffmpeg tesseract
+# c2patool: download from its GitHub releases
+
 python3 -m venv venv
 source venv/bin/activate
 pip install -r requirements.txt
-```
 
-## 2. Nutzung
-
-```bash
 python -m ai_act_labeler.cli --input ./incoming --output ./processed
 ```
 
-Optionale Parameter:
-
-```bash
-python -m ai_act_labeler.cli \
-    --input ./incoming \
-    --output ./processed \
-    --badge ./eigenes_badge.png \
-    --badge-position bottom-right \
-    --cert ./mein_cert.pem \
-    --key ./mein_key.pem
-```
-
-| Parameter | Beschreibung | Default |
+| Option | Meaning | Default |
 |---|---|---|
-| `--input` | Eingabeordner, wird **rekursiv** durchsucht | (Pflicht) |
-| `--output` | Ausgabeordner, enthält `compliant/`, `review/`, `report.csv`, `report.json` | (Pflicht) |
-| `--badge` | Eigenes Badge-PNG (mit Transparenz) | Standard-Badge wird automatisch erzeugt |
+| `--input` | Folder to scan, searched recursively | required |
+| `--output` | Gets `compliant/`, `review/`, `report.csv`, `report.json` | required |
+| `--badge` | Your own badge PNG with transparency | generated default |
 | `--badge-position` | `bottom-right`, `bottom-left`, `top-right`, `top-left` | `bottom-right` |
-| `--cert` / `--key` | Eigenes C2PA-Signaturzertifikat (Dateipfade zu PEM-Zertifikat/-Key) | Lokal generierte Test-Zertifikatskette (siehe unten) |
-| `--alg` | Signaturalgorithmus, muss zum `--key` passen (`es256` für EC-, `ps256` für RSA-Keys) | `es256` |
+| `--cert`, `--key` | Your own C2PA signing certificate and key (PEM) | local test certificate |
+| `--alg` | `es256` for EC keys, `ps256` for RSA keys | `es256` |
 
-Nach dem Lauf:
-- **`processed/compliant/`** — Dateien, die erfolgreich geprüft/ergänzt wurden
-- **`processed/review/`** — Dateien mit Fehlern oder nicht unterstütztem Dateityp
-  (Grund steht im Report)
-- **`processed/report.csv`** / **`processed/report.json`** — vollständiger Bericht
+Files in `review/` have an error or an unsupported type, the reason is in the report.
 
-## 3. Wichtiger Hinweis: Selbstsigniertes Test-Zertifikat
+Without `--cert` and `--key` the tool creates a self signed test certificate under `~/.ai_act_labeler/test_cert/`. That is enough to test the workflow, but no Content Credentials viewer will trust it. For real use you need a certificate from a recognised authority.
 
-Ohne `--cert`/`--key` erzeugt das Tool beim ersten Lauf automatisch ein
-selbstsigniertes Zertifikat unter `~/.ai_act_labeler/test_cert/` und verwendet
-es für alle weiteren Läufe wieder.
+For the Apps Script variant, see `google_apps_script/README.md`: copy the files into a project, enable the Drive API service, set `CONFIG.SOURCE_FOLDER_ID`, run `runManually` once for the permissions and `createTimeTrigger` once for the polling trigger. It only handles JPEG and writes no C2PA manifest.
 
-**Das reicht aus, um den technischen Workflow zu testen — aber ein
-selbstsigniertes Zertifikat wird von keinem Content-Credentials-Viewer als
-vertrauenswürdig angezeigt.** Für den Produktivbetrieb muss ein Zertifikat
-einer anerkannten Stelle (z.B. über das Content Authenticity Initiative
-Trust-List-Programm) beschafft und per `--cert`/`--key` eingebunden werden.
+## Notes
 
-## 4. Grenzen der Sichtbarkeits-Prüfung (Schritt 4)
+* The OCR check finds text badges only, not purely graphic symbols. If in doubt it adds a second badge rather than miss a label.
+* "Digital Source Type" exists only as an XMP property, so a single XMP write covers what people usually call the IPTC tag.
+* The Python path writes the short value `trainedAlgorithmicMedia`, while the Apps Script variant writes the full IPTC vocabulary URI. I noticed this mismatch late and left it as it is.
+* A self signed certificate makes the pipeline testable, but the trust part is still open.
 
-Der Check, ob ein Bild/Video bereits ein sichtbares "KI-generiert"-Label trägt,
-läuft über eine **OCR-Heuristik** (Tesseract), die die vier Bildecken bzw. den
-ersten Video-Frame nach Schlüsselwörtern durchsucht ("KI", "AI", "generiert",
-"generated"). Das erkennt zuverlässig **Text-Badges**, aber keine rein
-grafischen Symbole ohne Text. Im Zweifel wird lieber ein zusätzliches Badge
-eingefügt, als eine fehlende Kennzeichnung zu übersehen.
-
-Ist `tesseract` nicht installiert, wird automatisch davon ausgegangen, dass
-kein Label vorhanden ist (Badge wird dann immer ergänzt).
-
-## 5. Fehlerbehebung
-
-| Problem | Lösung |
-|---|---|
-| `ToolNotFoundError: ... 'exiftool' ...` | Tool laut Tabelle in Abschnitt 1.1 installieren, Terminal neu starten |
-| Datei landet in `review/` mit Fehler `c2patool konnte Manifest nicht einbetten` | Meist Zertifikatsproblem — `--cert`/`--key` prüfen oder Test-Zertifikat unter `~/.ai_act_labeler/test_cert/` löschen, damit es neu erzeugt wird |
-| Datei landet in `review/` mit `Nicht unterstützter Dateityp` | Nur `.jpg/.jpeg/.png/.webp` (Bild) und `.mp4/.mov` (Video) werden verarbeitet |
-| Video-Badge fehlt/falsch positioniert | `ffmpeg`-Version prüfen (`ffmpeg -version`), `overlay`-Filter erfordert ein aktuelles ffmpeg-Build |
-| OCR erkennt vorhandenes Label nicht (Badge wird doppelt eingefügt) | Unkritisch — führt nur zu einem zusätzlichen Badge, keine falsche Kennzeichnung. Ggf. `OCR_CORNER_FRACTION` in `ai_act_labeler/config.py` vergrößern |
-
-## 6. Projektstruktur
-
-```
-ai_act_labeler/
-├── cli.py               # Einstiegspunkt, Orchestrierung
-├── config.py            # Alle Konstanten/Defaults an einer Stelle
-├── metadata_reader.py   # Schritt 1: Scan (exiftool/ffprobe/c2patool)
-├── model_detection.py   # Schritt 2: Modell-Erkennung
-├── cert_utils.py        # Selbstsigniertes Test-Zertifikat
-├── metadata_writer.py   # Schritt 3: IPTC + C2PA-Manifest schreiben
-├── visible_label.py     # Schritt 4: OCR-Check + Badge-Overlay
-├── report.py            # Schritt 5: CSV/JSON-Report
-├── file_router.py       # Schritt 6: compliant/ vs. review/
-└── badge_assets/        # Standard-Badge (wird automatisch erzeugt)
-```
-
-Integration in eine bestehende Upload-Pipeline: `cli.py` vor dem CMS/PIM-Import
-aufrufen und nur die Dateien aus `processed/compliant/` weiterverarbeiten;
-`processed/review/` sollte von einem Menschen gesichtet werden.
+Built at Smilodox and published with permission. Supplier names, emails and business data were removed or replaced with placeholders.
